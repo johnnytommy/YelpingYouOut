@@ -1,0 +1,774 @@
+---
+title: "Yelping You Out: An Exploratory Analysis of Las Vegas Businesses"
+author: "Julia Greenberg, Utkarsh Nigam, Johnny  Thomas, Iswa Wasif, Zoey Zhao"
+date: "3/25/2020"
+output:
+html_document:
+    number_sections: true
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(scientific=T, digits = 3) 
+library(tidyverse)
+library(sf)
+library(dplyr)
+library(ggplot2)
+library(RColorBrewer)
+library(ggplotAssist)
+library(jsonlite)
+library(ggthemes)
+library(knitr)
+library(viridis)
+library(gridExtra)
+library(data.table)
+library(rPraat)
+library(leaps)
+library(rebus)
+library(stringr)
+
+#PATH to Shared Folder
+path1 <- "C:/Users/johnt/Box/Unicorn"
+
+# Load businesses
+business_all <- stream_in(file(paste0(path1,"/business.json")))
+
+business_LV <- subset(business_all, state=="NV")
+
+```
+
+
+# Introduction
+
+America. What a place! The food, the freedom, and of course, the free market! In today's 21st century economy it can be a challenge to get a small business off the ground but luckily there are several mechanisms in place which, if taken advantage of, can help bolster these first time business owners to a profitable workplace. Most local governments encourage small businesses however to get ahead in today's technological era, it is critical to use the best resources at one's disposal. In terms of restaurants, a large measure of success can be pointed to public opinion. The more people that have something good to say about your restaurant, the more people will trust they will have a good experience there. Conversely, this works in the other direction; if you do not have excellent food or service these delights could have abysmal ends. How exactly can you access a large survey of the public easily you ask? Let us introduce you to...
+
+![](yelp_image.png)
+
+Yelp is a business directory service and public review forum which develops, hosts, and markets the Yelp.com website and the Yelp mobile app. On the app, users can rate and review their favorite (or least favorite) businesses to help the community know what they have to offer. A high rating on the app usually leads to more business so it is critical for small buisness owners to get a high rating from as many people as possible.
+
+## The Yelp Challenge
+Every year, Yelp provides a subset of their data in a competition titled ["The Yelp Open Dataset Challenge"](https://www.yelp.com/dataset). Here they provide data from 1,968,703 users on over 1.4 million business attributes like hours, parking, availability, and ambience. This is an incredibly large dataset so we took it upon ourselves to dive in and see what potential avenues we could take with the project. While this challenge provides a plethora of information on users and reviews, our focus for this analysis will be on businesses, their attributes and their overall ratings.
+
+
+```{r echo=FALSE,message=FALSE}
+
+business2 <- business_all %>% 
+  group_by(state) %>% 
+  summarize(count = n()) %>% 
+  filter(count >500)
+
+
+ggplot(data = business2, aes(x =state, y = count , fill =state))+
+  geom_col() +
+  theme_fivethirtyeight() +
+  ggtitle("States Represented in Yelp Dataset (n > 500)")
+
+```
+
+With this initial breakdown of states, we see that there are only about **11** states represented in this dataset with more than 500 business observations reported.
+
+```{r Prepare-US-map, include = FALSE}
+US <- st_read(paste0(path1,"/US_shapefile/cb_2018_us_state_500k.shp"))
+
+# Change CRS
+US <- st_transform(US, 4326)
+
+# Get rid of non-mainland states & territories
+US$NAME <- as.character(US$NAME)
+nope <- c('American Samoa','Alaska','Commonwealth of the Northern Mariana Islands','Guam','Hawaii','Puerto Rico','United States Virgin Islands')
+US <- US %>% 
+  filter(!NAME %in% nope)
+
+
+# Get rid of non-US businesses
+canada <- c('AB','BAS','BC','CON','DOW','DUR','ON','QC','SC','XGL','XGM','XWY')
+business_US <- business_all %>% filter(!state %in% canada)
+business_US <- business_US %>% filter(city!="Toronto" & latitude<50 & !(city=="Pittsburgh" & latitude>43))
+```
+
+```{r Actual-US-map,echo=FALSE,message=FALSE}
+#Mainland Plot
+mainland <- ggplot() +
+  geom_sf(data=US,fill=NA) +
+  geom_point(data=business_US,aes(x=longitude,y=latitude),size=2,alpha=.5,color="#0B775E") +
+  theme(axis.title=element_blank(),
+      axis.text=element_blank(),
+      axis.ticks=element_blank(),
+      legend.position="none",
+      panel.grid=element_blank(),
+      panel.background=element_blank())
+mainland
+```
+
+```{r echo=FALSE,message=FALSE}
+v <- business_all %>% 
+  group_by(city) %>% 
+  summarize(count = n()) %>% 
+  arrange(desc(count))
+
+v <- head(v,10)
+
+knitr::kable(v)
+
+```
+
+The top ten cities in this dataset helped us narrow our focus for our analysis to the Entertainment Capital of the World, [LAS VEGAS](https://www.youtube.com/watch?v=9MO1KyNUOIs).
+
+## Viva Las Vegas!
+
+```{r Prepare-Nevada-map,include=FALSE}
+# State of Nevada shapefile
+NV_state <- read_sf(paste0(path1,"/NV_shapefile/tl_2010_32_state10.shp"))
+st_crs(NV_state)
+
+# Change the CRS
+NV_state <- st_transform(NV_state, 4326)
+
+# Want only data for Nevada
+str(business_all)
+NV_business <- read.csv(paste0(path1, "/businessLV_clean.csv"))
+NV_business <- NV_business %>%
+  filter(state=="NV")
+table(NV_business$state)
+
+# Make 'NV_business' a shapefile
+NV_business <- st_as_sf(NV_business, coords = c("longitude", "latitude"), crs=4326)
+NV_business <- cbind(NV_business, st_coordinates(NV_business))
+```
+
+The U.S. map shows that our dataset only includes businesses in a select group of cities. Since Las Vegas, Nevada has the highest count of businesses, we decided to restrict our analysis to just Las Vegas and its surrounding suburbs. It is clear from the map of Nevada that all of the data for the state are clustered around Las Vegas, so we do not need to worry about other parts of the state. An analysis of just this area is incredibly useful due to the booming tourism industry there; with many people coming from out of town to visit, having high ratings on Yelp can ensure foot-traffic coming to a buisness's doorstep.
+
+```{r Nevada-map,echo=FALSE,message=FALSE, warning = FALSE}
+
+all_NV <- ggplot() +
+  geom_sf(data=NV_state,fill=NA) +
+  geom_point(data=NV_business,aes(x=X.1,y=Y),size=2,alpha=.5,color="#0B775E") +
+  theme(axis.title=element_blank(),
+        axis.text=element_blank(),
+        axis.ticks=element_blank(),
+        legend.position="none",
+        panel.grid=element_blank(),
+        panel.background=element_blank())
+all_NV
+
+# Load Las Vegas shapefile
+vegas <- st_read(paste0(path1,"/Vegas_shapefile/City_and_County_Limits_Shaded_AdministrativeBoundaries.shp"))
+
+# Change the CRS of nevada shapefile
+vegas <- st_transform(vegas, 4326)
+```
+
+The following map shows the geographic distribution of businesses based on the number of reviews they have. The bigger, yellow bubbles represent businesses with a large number of reviews, while the smaller, purple bubbles represent businesses with a small number of reviews. It is not surprising that the businesses with the most reviews are concentrated in the center of the map - this area is close to downtown and the Las Vegas Strip, which is a commercial hub and very popular with tourists.
+
+```{r Number-of-reviews-map,echo=FALSE,message=FALSE}
+mybreaks <- c(25,100,1000,8000)
+
+NV_business <- NV_business %>% arrange(review_count)
+
+num_reviews <- ggplot() + 
+  geom_sf(data = vegas, fill="white", color="dark gray") +
+  geom_point(data = NV_business, aes(x=X.1,y=Y,size=review_count,color=review_count),alpha=.5,shape=19) +
+  scale_size_continuous(name="Number of \nreviews", trans="log", breaks=mybreaks) +
+  scale_alpha_continuous(name="Number of \nreviews", trans="log", breaks=mybreaks) +
+  scale_color_viridis(option="magma", trans="log", breaks=mybreaks, name="Number of \nreviews" ) +
+  theme_void() +
+  guides(colour = guide_legend()) +
+  xlim(-115.4935,-114.8875) +
+  ylim(35.92088,36.43825) +
+  theme(legend.position = c(0.15, 0.13),
+        legend.background = element_rect(fill = NA, color = NA),
+        legend.title = element_text(colour="black", size=11, face="bold"),
+        legend.text = element_text(colour="black", size=11),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank())
+num_reviews
+```
+
+The following four histograms show the frequency distribution of how many reviews the businesses have. The first histogram shows the distribution of all the data:
+
+```{r Number-of-reviews-histogram-full,echo=FALSE,message=FALSE}
+
+hist_numrev <- ggplot(data = NV_business,
+                 aes(x = review_count)) +
+  geom_histogram(binwidth=50,color='#43006a',fill='#43006a',alpha=.5) +
+  theme(legend.position = "none",
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text.y = element_text(color="black",size=11),
+        plot.title = element_blank(),
+        axis.text.x = element_text(color="black",size=11),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        axis.title = element_blank(),
+        panel.grid = element_blank(),
+        plot.background = element_rect(fill = "transparent",colour = NA))
+hist_numrev
+```
+
+The data are extremely right-skewed, which means that the vast majority of businesses have few reviews but there are outliers with many reviews - up to approximately 8,000. These outlier businesses are likely popular tourist spots and are concentrated downtown or around The Strip, as we can see from the map. Since the data are so heavily skewed, the histogram makes it difficult to visualize how the data are distributed. Here is a histogram that shows the distribution of businesses with only 2000 reviews or fewer...
+
+```{r Number-of-reviews-histogram-less-than-2000,echo=FALSE,message=FALSE}
+
+NV_business_subset <- NV_business %>%
+  filter(review_count<2000)
+
+hist_numrev1 <- ggplot(data = NV_business_subset,
+                 aes(x = review_count)) +
+  geom_histogram(binwidth=50,color='#43006a',fill='#43006a',alpha=.5) +
+  theme(legend.position = "none",
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text.y = element_text(color="black",size=11),
+        plot.title = element_blank(),
+        axis.text.x = element_text(color="black",size=11),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        axis.title = element_blank(),
+        panel.grid = element_blank(),
+        plot.background = element_rect(fill = "transparent",colour = NA))
+hist_numrev1
+```
+
+...and only 250 or fewer... 
+
+```{r Number-of-reviews-histogram-less-than-250,echo=FALSE,message=FALSE}
+
+NV_business_subset2 <- NV_business %>% filter(review_count<250)
+
+hist_numrev2 <- ggplot(data = NV_business_subset2,
+                 aes(x = review_count)) +
+  geom_histogram(binwidth=15,color='#43006a',fill='#43006a',alpha=.5) +
+  theme(legend.position = "none",
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text.y = element_text(color="black",size=11),
+        plot.title = element_blank(),
+        axis.text.x = element_text(color="black",size=11),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        axis.title = element_blank(),
+        panel.grid = element_blank(),
+        plot.background = element_rect(fill = "transparent",colour = NA))
+hist_numrev2
+```
+
+...and only 50 or fewer:
+
+```{r Number-of-reviews-histogram-less-than-50,echo=FALSE,message=FALSE}
+
+NV_business_subset3 <- NV_business %>%
+  filter(review_count<50)
+
+hist_numrev3 <- ggplot(data = NV_business_subset3,
+                 aes(x = review_count)) +
+  geom_histogram(binwidth=2,color='#43006a',fill='#43006a',alpha=.5) +
+  theme(legend.position = "none",
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text.y = element_text(color="black",size=11),
+        plot.title = element_blank(),
+        axis.text.x = element_text(color="black",size=11),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        axis.title = element_blank(),
+        panel.grid = element_blank(),
+        plot.background = element_rect(fill = "transparent",colour = NA))
+hist_numrev3
+```
+
+This QQ-plot provides even more visual evidence of the fact that the number of reviews is not normally distributed:
+
+```{r QQplot,echo=FALSE,message=FALSE}
+qqnorm(NV_business$review_count, pch = 1, frame = FALSE)
+qqline(NV_business$review_count, col = "red")
+```
+
+In addition to the number of reviews, we wanted to see if there are any geographic patterns in how highly businesses are rated. In the following map, the darker reddish-colored bubbles represent businesses with high ratings, while the lighter yellow-colored bubbles represent businesses with low ratings.
+
+```{r Ratings-map,echo=FALSE,message=FALSE}
+
+# Plot based on ratings
+stars <- ggplot() + 
+  geom_sf(data = vegas, fill="white", color="dark gray") +
+  geom_point(data = NV_business, aes(x=X.1,y=Y,color=stars),size=1.5,alpha=0.5,shape=19) +
+  scale_color_gradient(name="Rating",low="#ffffb2", high="#bd0026",guide="colourbar") +
+  xlim(-115.4935,-114.8875) +
+  ylim(35.92088,36.43825) +
+  theme(legend.position = c(0.2, 0.08),
+        legend.background = element_rect(fill = NA, color = NA),
+        legend.title = element_text(colour="black", size=13, face="bold"),
+        legend.text = element_text(colour="black", size=13),
+        legend.direction = "horizontal",
+        axis.title=element_blank(),
+        axis.text=element_blank(),
+        axis.ticks=element_blank()) +
+  guides(color = guide_colourbar(ticks = FALSE))
+stars
+```
+
+It appears that highly and poorly rated businesses are fairly equally dispersed throughout the Las Vegas area. Although businesses downtown tend to have more ratings, they do not necessarily have higher ratings compared to businesses with less central locations. This histogram shows the frequency distribution of businesses' ratings:
+
+```{r Ratings-histogram,echo=FALSE,message=FALSE}
+
+hist_stars <- ggplot(data = NV_business,
+                 aes(x = stars)) +
+  geom_histogram(binwidth = 0.5,color='#bd0026',fill='#bd0026',alpha=.5) +
+  theme(legend.position = "none",
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text.x = element_text(color="black",size=11),
+        plot.title = element_blank(),
+        axis.text.y = element_text(color="black",size=11),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        panel.grid = element_blank(),
+        plot.background = element_rect(fill = "transparent",colour = NA)) +
+  labs(title = "", subtitle = "",
+       x = "",
+       y = "")
+hist_stars
+```
+
+It is evident that the ratings data are left-skewed, meaning high ratings are more common than low ratings. Since neither the number of reviews nor the ratings are normally distributed, in order to observe the correlation between the two variables, we calculated the Spearman coefficient:
+
+```{r Correlation,echo=FALSE,message=FALSE,warning=FALSE}
+cortest <- cor.test(NV_business$stars,NV_business$review_count,method="spearman")
+cortest
+```
+
+The p-value is close to zero, which indicates there is a statistically significant correlation between the two variables. However, the magnitude of the coefficient (-0.023) is so small that this correlation is negligible. Therefore we cannot make any strong conclusions about the relationship between ratings and the number of reviews.
+
+```{r Prepare-alcohol-map,include=FALSE}
+
+# Don't want NAs
+no_alc_NAs <- NV_business %>% filter(!is.na(attributes.Alcohol))
+
+# Convert to ASCII
+#stri_enc_toascii(no_alc_NAs$attributes.Alcohol)
+
+# Get rid of leading & trailing apostrophes
+no_alc_NAs$attributes.Alcohol <- gsub("'", "", no_alc_NAs$attributes.Alcohol)
+
+# Get rid of leading u's
+no_alc_NAs$attributes.Alcohol <- str_remove(no_alc_NAs$attributes.Alcohol, pattern = START %R% "u")
+table(no_alc_NAs$attributes.Alcohol)
+
+# Change "None" to "none"
+no_alc_NAs$attributes.Alcohol[no_alc_NAs$attributes.Alcohol == "none"] <- "None"
+
+# Rename other columns
+no_alc_NAs$attributes.Alcohol[no_alc_NAs$attributes.Alcohol == "beer_and_wine"] <- "Beer & Wine"
+no_alc_NAs$attributes.Alcohol[no_alc_NAs$attributes.Alcohol == "full_bar"] <- "Full Bar"
+table(no_alc_NAs$attributes.Alcohol)
+```
+
+Our last map explores the geographic distribution of businesses with different levels of alcohol served. We thought this would be interesting because Las Vegas - especially The Strip - is known for partying and drinking. Since not all businesses in the dataset are restaurants or bars, we eliminated any NA values for the 'Alcohol' variable. Sure enough, the map shows that businesses with a full bar are generally concentrated downtown, near The Strip, while establishments that do not serve alchohol or only serve beer and wine are spread out throughout the city. The histogram legend shows that the plurality of businesses (with non-NA Alcohol values) do not serve any alcohol, and there are more businesses with a full bar than businesses that only serve beer and wine. It would be interesting to compare these results to another city that is not known for drinking and partying.
+
+```{r Make-alcohol-map,echo=FALSE,message=FALSE,warning=FALSE}
+
+# Make color ramp
+three.colors <- c("#35274A","#F2300F","#E1BD6D")
+
+# Make map
+alc <- ggplot() + 
+  geom_sf(data = vegas, fill="white", color="dark gray") +
+  geom_point(data = no_alc_NAs, aes(x=X.1,y=Y,color=as.factor(attributes.Alcohol)),size=3,alpha=.5) +
+  scale_color_manual(values=three.colors) +
+  xlim(-115.4935,-114.8875) +
+  ylim(35.92088,36.43825) +
+  theme(axis.title=element_blank(),
+        axis.text=element_blank(),
+        axis.ticks=element_blank(),
+        #legend.key=element_rect("black"),
+        legend.position="none") +
+  labs(color = "Alcohol Served")
+
+# Make histogram legend
+hist.leg <- ggplot() +
+  geom_histogram(data = no_alc_NAs,
+                 aes(x = attributes.Alcohol, fill = as.factor(attributes.Alcohol)), stat="count") +
+  scale_fill_manual(values = three.colors) +
+  theme(legend.position = "none",
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text.y = element_text(color="black",size=11),
+        #plot.title = element_text(face="bold",color="black",size=11,vjust=-8,hjust=0),
+        plot.title = element_blank(),
+        axis.text.x = element_blank(),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        panel.grid = element_blank(),
+        plot.background = element_rect(fill = "transparent",colour = NA)) +
+  labs(title = "", subtitle = "",
+       x = "",
+       y = "") +
+  coord_flip()
+
+# Add histogram legend to map
+legend_grob = ggplotGrob(hist.leg)
+
+final_alc <- alc + annotation_custom(grob = legend_grob, 
+                                           xmin = -115.52, 
+                                           xmax = -115.25, 
+                                           ymin = 35.88, 
+                                           ymax = 36.02)
+final_alc
+```
+
+
+# Data Cleaning
+
+## The Variables
+
+Note: Converting the dataframe to data table to flatten the inner indexed columns  
+Below are the variables in the data set:
+```{r echo=FALSE,message=FALSE}
+data <- as.data.table(business_LV)
+names(data)
+```
+
+
+Now we want to remove the non-relevant variables.
+
+Below is the percentage missing values in every column:
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+total_rows <- nrow(data)
+check_na <- colSums(is.na(data))
+percent_na <- check_na*100/total_rows
+df <- as.data.frame(percent_na)
+print(df)
+df$names <- rownames(df)
+remove_columns <- subset(df, percent_na>95)
+count_removed <- nrow(remove_columns)
+remove_columns <- as.vector(remove_columns$names)
+#remove_columns <- paste("attributes.",remove_columns,sep='')
+clean_data <- data
+
+for (value in remove_columns){
+  clean_data <- subset(clean_data, select = names(clean_data) != value)
+}
+```
+
+Columns with percentage NA values > 95% were removed i.e., **`r count_removed` columns**.    
+Hence, after cleaning, final data set has **`r ncol(clean_data)` columns** listed below:
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+names(clean_data)
+```
+
+
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+clean_data$attributes.WiFi <- as.factor(clean_data$attributes.WiFi)
+clean_data$attributes.OutdoorSeating <- as.factor(clean_data$attributes.OutdoorSeating)
+```
+Note: Data type of some of the variables has been converted to categorical. 
+
+
+## Structuring the Dataset
+
+Following are the various business categories:
+![](clouds/Picture1.png)
+
+
+### Major business categories
+
+![](clouds/cat1.png)
+<br><br>
+![](clouds/cat2.png)
+<br><br><br><br>
+
+### Structuring the Dataset into Multiple Business Categories
+
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+my_data <- clean_data
+my_data$Type <-"Not Specified"
+real_estate_financial_advisory<-c("Bank","Financial","Credit","Brokers","Bankruptcy","Lawyers","Insurance","Estate")
+automotive <- c("Automotive","Car","Repair","Motorcycle","Smog","Transmission","Wheel","Vehicle")
+food_bar_casinos <- c("Food","Bars","Restaurants","Nightlife","Mexican","American","Sandwich","Coffee","Pizza","Burgers","Breakfast","Brunch","Desserts","Chinese","Italian","Seafood","Wine","Japanese","Beer","Bakeries","Asian","Chicken","Juice","Smoothies","Spirits","Cafes","Sushi","Barbeque","Steakhouses","Salad","Cocktail","Pubs","Casinos")
+personal_care <- c("Spas","Beauty","Hair","Salons","Nail","Stylists","Makeup","Cosmetics","Eyelash","Waxing","Tattoo","Massage","Tanning","Eyebrow")
+travel <- c("Travel","Hotels","Tours","Transportation","Airport","Bus","Resorts","Vacation","Shuttles","Taxi")
+medical <- c("Medical","Health","Doctor","Dentist","Dentistry","Therapy","Surgeons","Medicine","Chiropractors","Optometrists","Orthodontists","Diagnostic","Gynecologists","Obstetricians","Endodontists","Pediatric")
+
+my_data$Type[str_detect(my_data$categories,paste(automotive,collapse = '|'))] <- "automotive"
+my_data$Type[str_detect(my_data$categories,paste(real_estate_financial_advisory,collapse = '|'))] <- "real_estate_financial_advisory"
+my_data$Type[str_detect(my_data$categories,paste(food_bar_casinos,collapse = '|'))] <- "food_bar_casinos"
+my_data$Type[str_detect(my_data$categories,paste(personal_care,collapse = '|'))] <- "personal_care"
+my_data$Type[str_detect(my_data$categories,paste(travel,collapse = '|'))] <- "travel"
+my_data$Type[str_detect(my_data$categories,paste(medical,collapse = '|'))] <- "medical"
+```
+Data set has been segmented into six major categories:
+* **Automotive**
+* **Food Bar Casinos**
+* **Medical**
+* **Real Estate Financial Advisory**
+* **Personal Care**
+* **Travel**
+
+
+## EDA for Business Categories
+
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+major_types <- subset(my_data,Type!="Not Specified")
+nan <- subset(my_data,Type=="Not Specified")
+#write.csv(major_types,"AllBUsinessData.csv")
+category_numbers <- major_types %>%
+                      group_by(Type) %>%
+                      summarise(star_ratings = mean(stars))
+print(category_numbers)
+total_numbers <- major_types %>%
+                      group_by(Type) %>%
+                      tally()
+print(total_numbers)
+counts <- table(major_types$Type)
+#print(counts)
+barplot(counts, main="Categories",
+   xlab="Count")
+```
+
+
+### ANOVA for Star Ratings among the Business Categories
+
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+anova_business <- aov(stars ~ Type,data=major_types)
+summary(anova_business)
+tukeyAoV <- TukeyHSD(anova_business)
+tukeyAoV
+```
+As per the ANOVA test, since p-value is less than 0.05, hence we reject the Null Hypothesis that all businesses have similar average star ratings. When we followed this by Post Hoc Tukey HSD test, it emphasized on the variance in the star ratings.  
+
+Therefore, we conclude that different business categories have different avg. star ratings.  
+
+
+### Business Categories with respect to Star Ratings
+
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+box_plot_categpries <- ggplot(major_types, aes(x = Type, y = stars)) +
+  scale_y_continuous(name = "Star Ratings") + 
+  scale_x_discrete(name = "Categories") +
+  geom_boxplot(fill = "Orange", colour = "red",
+               alpha = 0.5, outlier.colour = "red", outlier.shape = 19) + 
+  theme_bw() + 
+  ggtitle("Boxplot: Star Rating of Business Categories")
+box_plot_categpries
+```
+
+
+Among all the businesses, food, bar and casinos has the least Inter Quartile Range, which means 50% of the star ratings are more concentrated near the median as compared to the other businesses.  
+
+
+
+### Star Ratings Distribution for Business Category
+
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+types <- c("automotive","food_bar_casinos","medical","real_estate_financial_advisory","personal_care","travel")
+
+for (value in types){
+  clean_data <- subset(major_types ,Type==value)
+  p1 <- ggplot(data=clean_data, aes(clean_data$stars)) + 
+  geom_histogram(col='white',fill='purple',binwidth = 0.1, bins = NULL)+ 
+  labs(title=value, x="", y="") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),panel.grid.minor=element_blank())
+  grid.arrange(p1, nrow = 1)
+}
+
+```
+
+ 
+Among all the businesses, food, bar and casinos has the distribution more closer to normal distrinution as compared to the other businesses.
+
+Therefore, we would be building the model for the **food, bar and casinos** business.
+
+
+## Other Notable Trends in Star Ratings, Open/Close Status
+
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+p2 <- ggplot(data=major_types, aes(major_types$stars)) + 
+  geom_histogram(col='white',fill='blue',binwidth = 0.1, bins = NULL)+ 
+  labs(title="Star Ratings", x="", y="") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),panel.grid.minor=element_blank())
+grid.arrange(p2, nrow = 1)
+
+hist(major_types$is_open, main="Is_Open", col = 'Green' )
+
+my_data$is_open <- as.factor(my_data$is_open)
+box_plot_open_close <- ggplot(my_data, aes(x = is_open, y = stars)) +
+  scale_y_continuous(name = "Star Ratings") + 
+  scale_x_discrete(name = "Is_Open") +
+  geom_boxplot(fill = "green", colour = "darkgreen",
+               alpha = 0.5, outlier.colour = "darkgreen", outlier.shape = 19) + 
+  theme_bw() + 
+  ggtitle("Boxplot: Star Rating of Open and Close")
+box_plot_open_close
+```
+
+Given all these analyses, we were able to hone our research down to food, bar, and casinos in Las Vegas. In doing so we were able to refine our research question to the following:
+
+**Which attributes most strongly impact the rating status of a Las Vegas Food, Bar, or Casino Business?"**
+
+
+# Preliminary Model Building
+
+```{r include = FALSE}
+fun <- read.csv(paste0(path1,"/food_bar_casinos.csv"))
+fun$X.1 <- fun$X <- fun$busibess_id <- fun$city <- fun$state <-fun$postal_code <- fun$postal_code <-fun$latitude <-fun$longitude <- NULL
+
+funday <- fun
+colnames(funday)[5:29]=c("review","is_open","good4kids","reservations","good4meal","bizparking","caters","noiselevel","tbservice","takeout","pricerange","outdoorseat","bikeparking","ambience","hasTV","wifi","alcohol","attire","good4groups","delivery","creditcard","bitcoin","apptonly","insurance","wheelchair")
+
+```
+
+Now that we have done a thorough exploratory data analysis, we want to move closer to finding our which variables have the strongest impact on rating (This is measured with their 'stars'(Factor0-5)).
+Since most variables are stored as factor, we did not do a correlation plot and opted to look at the significances of each variable. Our first question is "does review (review_count) has a impact on stars rating???"
+Therefore, we build our first model:
+ 
+```{r echo = FALSE}
+model1 = lm(stars~review,data=funday)
+summary(model1)
+```
+The effect of coefficient values for `review` on this model is positive.
+The p-value for both Intercept and `review` are the same and significant.
+The multiple R-squared value are almost the same as the adjusted R-squared vaulue in the variables.
+
+
+```{r echo = FALSE}
+model2 = lm(stars~review+good4groups+alcohol,data=funday)
+summary(model2)
+```
+In this next model, we add two factor variables `good4groups` and `alcohol` into it.
+The effect of coefficient values for `review` on this model is positive. 
+The p-value for `Intercept`, `review` and `good4groups` are the small which is positive in statistic.
+However, We can see the variable` alcohol` is insignificant, so we exclude it in the next model.
+
+
+```{r echo = FALSE}
+model3 = lm(stars~review+good4groups+outdoorseat,data=funday)
+summary(model3)
+```
+Now, we add `outdoorseat` into this model, the effect of coefficient values for `review` on this model is positive.
+The coefficient for `outdoorseatTrue` indicates the model has more starts than `outdoorseatNone` while the varibale `review` and `good4groupTrue` doesn not change. The p-value for `Intercept`, `review`, `good4groups` and `outdoorseatTrue` are the small which is positive in statistic. Therefore, the restaurants which have outdoorseating do get BETTER stars.
+
+
+```{r echo = FALSE}
+model4 = lm(stars~review+good4groups+outdoorseat+pricerange,data=funday)
+summary(model4)
+```
+we add `pricerange` into the model4. From this model, we can probably figure out if the different levels of pricrange have impact on stars. These models lead us to more future study...
+
+Note: The categories within alcohol have been reduced to 'beer and wine', 'full bar' and 'none'. 
+
+
+# Feature Selection
+
+```{r include = FALSE}
+food <- read.csv(paste0(path1,"/food_bar_casinos.csv"))
+levels(food$attributes.Alcohol)
+levels(food$attributes.Alcohol)[4] <- "'none'"
+levels(food$attributes.Alcohol)[6] <- "'none'"
+levels(food$attributes.Alcohol)[4] <- "'beer_and_wine'"
+levels(food$attributes.Alcohol)[4] <- "'full_bar'"
+levels(food$attributes.NoiseLevel)[6] <- "'average'"
+levels(food$attributes.NoiseLevel)[6] <- "'loud'"
+levels(food$attributes.NoiseLevel)[6] <- "'quiet'"
+levels(food$attributes.NoiseLevel)[6] <- "'very_loud'"
+
+levels(food$attributes.RestaurantsTakeOut)[2] <- "False"
+
+levels(food$attributes.NoiseLevel)[5] <- NA
+
+levels(food$attributes.OutdoorSeating)[2] <- NA 
+
+levels(food$attributes.WiFi)[4] <- "'no'"
+levels(food$attributes.WiFi)[4] <- "'free'"
+levels(food$attributes.WiFi)[4] <- "'no'"
+levels(food$attributes.WiFi)[4] <- "'paid'"
+
+levels(food$attributes.RestaurantsAttire)[5] <- "'casual'"
+levels(food$attributes.RestaurantsAttire)[5] <- "'dressy'"
+levels(food$attributes.RestaurantsAttire)[5] <- "'formal'"
+```
+
+```{r include = FALSE}
+food_data = food[,c('stars', 'review_count', 'is_open', 'attributes.GoodForMeal', 'attributes.BusinessParking', 'attributes.NoiseLevel', 'attributes.RestaurantsTableService', 'attributes.RestaurantsTakeOut', 'attributes.RestaurantsPriceRange2', 'attributes.OutdoorSeating', 'attributes.Ambience', 'attributes.WiFi', 'attributes.Alcohol', 'attributes.RestaurantsAttire')]
+
+
+```
+
+We used the LEAPS package in R to perform feature selection in order to determine the most appropriate variables for predicting star ratings, which we could then include in our final model. In order to do this, we created a subset of the entire dataset which only included variables that did not have linear dependencies and were appropriately coded as factor variables. Some of the measures of cross-validation we will be looking at are R-squared, adjusted R-squared, Cp and BIC. 
+
+The plots below illustrate each of these measures, visually depicting which variables are the best fit for predicting ratings in the given dataset. 
+
+```{r echo = FALSE, warning = FALSE}
+reg1 <- regsubsets(stars~attributes.NoiseLevel+attributes.RestaurantsTableService+attributes.RestaurantsTakeOut+attributes.RestaurantsPriceRange2+attributes.OutdoorSeating+attributes.WiFi + attributes.Alcohol+attributes.RestaurantsAttire , data = food_data, nvmax = 10)
+```
+
+For R-squared and adjusted R-squared, higher values are indicative of more accurate models since these measure the variation in the dependent variable (ratings) which is explained by the independent variables (restaurant attributes). In this particular subset, the highest values we are able to achieve are 12% for R-squared and 11% for adjusted R-squared. We can see which models correspond to these values in the graphs below.
+
+
+```{r}
+plot(reg1, scale = "r2", main = "R^2")
+plot(reg1, scale = "adjr2", main = "Adjusted R^2")
+
+```
+
+
+For Cp and BIC on the other hand, smaller values are indicative of better models. The best fit model corresponding to the lowest Cp has a value of 9.2 while for BIC we can choose between the six models that have a value of -160. 
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+plot(reg1, scale = "Cp", main = "Cp")
+summary(reg1)
+plot(reg1, scale = "bic", main = "BIC")
+
+```
+
+
+The plots below depict the results of performing feature selection using backward and forward selection. There appear to be no discernible differences between the two methods; both result in the same variables for the best fit model.
+
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+
+
+reg2 <- regsubsets(stars~attributes.NoiseLevel+attributes.RestaurantsTableService+attributes.RestaurantsTakeOut+attributes.RestaurantsPriceRange2+attributes.OutdoorSeating+attributes.WiFi + attributes.Alcohol+attributes.RestaurantsAttire , data = food_data, method="backward")
+
+plot(reg2, scale = "r2", main = "R^2")
+plot(reg2, scale = "adjr2", main = "Adjusted R^2")
+plot(reg2, scale = "Cp", main = "Cp")
+summary(reg2)
+plot(reg2, scale = "bic", main = "BIC")
+
+```
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+
+reg3 <- regsubsets(stars~attributes.NoiseLevel+attributes.RestaurantsTableService+attributes.RestaurantsTakeOut+attributes.RestaurantsPriceRange2+attributes.OutdoorSeating+attributes.WiFi + attributes.Alcohol+attributes.RestaurantsAttire , data = food_data, method="forward")
+
+plot(reg3, scale = "r2", main = "R^2")
+plot(reg3, scale = "adjr2", main = "Adjusted R^2")
+plot(reg3, scale = "Cp", main = "Cp")
+summary(reg3)
+plot(reg3, scale = "bic", main = "BIC")
+```
+
+
+
+
+## Linear Model 
+
+We now build a multiple linear regression for analyzing the effects of restaurant attributes on star ratings. By looking at the coefficients on the independent variables and the P-values, we can make inferences about the impact of various attributes on star ratings. 
+From these results, it appears 'Noise Levels' are a statistically significant factor in determining restaurant ratings. Individuals appear to prefer quiet restaurants to average ones, but negatively rate loud and very loud restaurants.
+Restaurants with table service, take-out options and outdoor seatings also appear to have higher ratings at a statistically significant level. 
+It is also evident from these results that restaurants with a full bar do not perform as well along Yelp ratings as restaurants with only beer and wine service. The coefficient on the variable comparing this to 'no alcohol' is not statistically significant, so we cannot make any inferences in this case. 
+Restaurants with free WiFi appear to perform better than restaurants with no WiFi at a statistically significant level as well. 
+
+```{r echo = FALSE, warning = FALSE}
+
+model1 <- lm(formula = stars ~ attributes.NoiseLevel + attributes.RestaurantsTableService +  attributes.RestaurantsTakeOut + attributes.RestaurantsPriceRange2 + attributes.OutdoorSeating + attributes.WiFi + attributes.Alcohol + attributes.RestaurantsAttire, data = food_data)
+
+summary(model1)
+
+```
+ 
+Given all the analyses done in this Exploratory Data Analysis, we have a good sense of direction to build more robust models and provide valuable insight for Las Vegas business owners!
